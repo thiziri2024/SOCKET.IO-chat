@@ -14,7 +14,6 @@ const io = new Server(server, { cors: { origin: "*" } });
 app.use(cors());
 app.use(express.json());
 
-// Connexion MongoDB
 mongoose.connect(process.env.MONGO_URI, {
   useNewUrlParser: true,
   useUnifiedTopology: true
@@ -22,7 +21,6 @@ mongoose.connect(process.env.MONGO_URI, {
 .then(() => console.log('✅ Connecté à MongoDB Atlas'))
 .catch(err => console.error('❌ Erreur MongoDB:', err));
 
-// Récupération de l'historique
 app.get("/messages/:user1/:user2", async (req, res) => {
   try {
     const { user1, user2 } = req.params;
@@ -44,33 +42,38 @@ const userSocketMap = {}; // userId → socketId
 io.on("connection", (socket) => {
   console.log("🔌 Utilisateur connecté :", socket.id);
 
-  // enregistrer utilisateur
-  socket.on("register", (userId) => {
+  socket.on("register", (userIdRaw) => {
+    const userId = userIdRaw.trim().toLowerCase();
     userSocketMap[userId] = socket.id;
     console.log("📥 Register:", userId, "=>", socket.id);
+
+    // 🔹 notifier tous les autres utilisateurs que cet utilisateur est en ligne
+    Object.keys(userSocketMap).forEach((id) => {
+      if (id !== userId) {
+        const otherSocket = userSocketMap[id];
+        if (otherSocket) io.to(otherSocket).emit("userOnline", { userId });
+      }
+    });
+
+    // 🔹 envoyer la liste des utilisateurs en ligne au nouvel utilisateur
+    const onlineUsers = Object.keys(userSocketMap).filter((id) => id !== userId);
+    socket.emit("onlineUsers", onlineUsers);
   });
 
-  // envoyer message
   socket.on("sendMessage", async (data) => {
     try {
       const { senderId, receiverId, text } = data;
       const newMsg = new Message({ senderId, receiverId, text, read: false });
       const saved = await newMsg.save();
 
-      // message renvoyé à l'expéditeur
       socket.emit("receiveMessage", saved);
-
-      // message transmis au destinataire
       const receiverSocket = userSocketMap[receiverId];
-      if (receiverSocket) {
-        io.to(receiverSocket).emit("receiveMessage", saved);
-      }
+      if (receiverSocket) io.to(receiverSocket).emit("receiveMessage", saved);
     } catch (err) {
       console.error("❌ Erreur sendMessage:", err);
     }
   });
 
-  // marquer dernier message comme lu
   socket.on("markAsRead", async ({ reader, other }) => {
     try {
       const lastMsg = await Message.findOne(
@@ -92,17 +95,21 @@ io.on("connection", (socket) => {
   });
 
   socket.on("disconnect", () => {
+    let disconnectedUser = null;
     for (const [id, sId] of Object.entries(userSocketMap)) {
       if (sId === socket.id) {
+        disconnectedUser = id;
         delete userSocketMap[id];
         break;
       }
     }
-    console.log("🔌 Utilisateur déconnecté :", socket.id);
+    if (disconnectedUser) {
+      console.log("🔌 Utilisateur déconnecté :", disconnectedUser);
+      socket.broadcast.emit("userOffline", { userId: disconnectedUser });
+    }
   });
 });
 
-// route test
 app.get("/users", async (_, res) => {
   const users = await User.find();
   res.json(users);
