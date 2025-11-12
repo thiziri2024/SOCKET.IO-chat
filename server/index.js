@@ -93,6 +93,15 @@ io.on("connection", (socket) => {
       console.error("❌ Erreur markAsRead:", err);
     }
   });
+    
+    socket.on("typing", ({ sender, receiver, isTyping }) => {
+  const receiverSocket = userSocketMap[receiver];
+  if (receiverSocket) {
+    io.to(receiverSocket).emit("typing", { sender, isTyping });
+  }
+});
+
+
 
   socket.on("disconnect", () => {
     let disconnectedUser = null;
@@ -108,7 +117,8 @@ io.on("connection", (socket) => {
       socket.broadcast.emit("userOffline", { userId: disconnectedUser });
     }
   });
-});
+
+  });
 
 app.get("/users", async (_, res) => {
   const users = await User.find();
