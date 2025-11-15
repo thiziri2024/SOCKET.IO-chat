@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+import mongoose from "mongoose";
 
 const userSchema = new mongoose.Schema({
     email: { type: String, required: true, unique: true },
@@ -17,4 +17,5 @@ const userSchema = new mongoose.Schema({
     resetPasswordToken: String
 });
 
-module.exports = mongoose.model('User', userSchema);
+// Export nommé compatible ES Module
+export const User = mongoose.model('Users', userSchema);

@@ -1,201 +1,128 @@
-require('dotenv').config();
-const express = require("express");
-const http = require("http");
-const { Server } = require("socket.io");
-const mongoose = require("mongoose");
-const cors = require("cors");
+import dotenv from "dotenv";
+dotenv.config();
 
-const Message = require("./models/Message");
-const User = require("./models/User");
-const Group = require("./models/Group");
+import express from "express";
+import http from "http";
+import { Server } from "socket.io";
+import mongoose from "mongoose";
+
+import { User } from "./models/Users.js";
+import { Conversation } from "./models/Conversations.js";
+import { Message } from "./models/Messages.js";
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
 
-app.use(cors());
+const io = new Server(server, {
+  cors: { origin: process.env.CLIENT_URL, methods: ["GET", "POST"] },
+});
+
 app.use(express.json());
 
+// --- MongoDB ---
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('✅ Connecté à MongoDB Atlas'))
-  .catch(err => console.error('❌ Erreur MongoDB:', err));
+  .then(() => console.log("✅ MongoDB connected"))
+  .catch(err => console.error("❌ MongoDB error:", err));
 
-// ---------------------- helper ----------------------
-function normalizeMembers(arr) {
-  return [...new Set(arr.map(e => String(e).trim().toLowerCase()))].sort();
-}
-// --------------------------------------------------
+app.get("/", (_, res) => res.send("Backend OK"));
 
-// ---------------- REST : messages & group ----------------
-app.get("/messages/:user1/:user2", async (req, res) => {
-  try {
-    const { user1, user2 } = req.params;
-    const messages = await Message.find({
-      $or: [
-        { senderId: user1, receiverId: user2 },
-        { senderId: user2, receiverId: user1 }
-      ]
-    }).sort({ createdAt: 1 });
-    res.json(messages);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Erreur serveur" });
-  }
-});
-
-app.get("/messages/group/:groupId", async (req, res) => {
-  try {
-    const { groupId } = req.params;
-    const messages = await Message.find({ groupId }).sort({ createdAt: 1 });
-    res.json(messages);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Erreur serveur" });
-  }
-});
-
-// find or create a group for an exact set of members
-app.post("/groups/check-or-create", async (req, res) => {
-  try {
-    const { members } = req.body;
-    if (!Array.isArray(members) || members.length < 2) {
-      return res.status(400).json({ message: "members must be an array with at least 2 emails" });
-    }
-    const normalized = normalizeMembers(members);
-    let group = await Group.findOne({ members: normalized });
-    if (!group) {
-      group = new Group({ name: `Groupe-${Date.now()}`, members: normalized });
-      await group.save();
-    }
-    res.json(group);
-  } catch (err) {
-    console.error("❌ /groups/check-or-create", err);
-    res.status(500).json({ message: "Erreur serveur" });
-  }
-});
-
-app.get("/users", async (_, res) => {
-  const users = await User.find();
-  res.json(users);
-});
-app.get("/groups", async (_, res) => {
-  const groups = await Group.find();
-  res.json(groups);
-});
-app.post("/groups", async (req, res) => {
-  try {
-    const { name, members } = req.body;
-    const group = new Group({ name, members: normalizeMembers(members) });
-    await group.save();
-    res.json(group);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ message: "Erreur création groupe" });
-  }
-});
-// ------------------------------------------------------------
-
-// ---------------- Socket.io realtime ----------------
-const userSocketMap = {}; // userId -> socketId
+// ---------------- SOCKET.IO ----------------
+const onlineUsers = {}; // email -> socket.id
 
 io.on("connection", (socket) => {
-  console.log("🔌 Utilisateur connecté :", socket.id);
+  console.log("User connected:", socket.id);
 
-  socket.on("register", (userIdRaw) => {
-    const userId = String(userIdRaw).trim().toLowerCase();
-    userSocketMap[userId] = socket.id;
-
-    Object.keys(userSocketMap).forEach(id => {
-      if (id !== userId && userSocketMap[id]) {
-        io.to(userSocketMap[id]).emit("userOnline", { userId });
-      }
-    });
-
-    const onlineUsers = Object.keys(userSocketMap).filter(id => id !== userId);
-    socket.emit("onlineUsers", onlineUsers);
+  // ---- USER CONNECT ----
+  socket.on("register", (email) => {
+    const norm = email.trim().toLowerCase();
+    onlineUsers[norm] = socket.id;
+    io.emit("onlineUsers", Object.keys(onlineUsers));
   });
 
-  // ✅ Amélioration : joinGroup avec historique
-  socket.on("joinGroup", async ({ groupId, userId }) => {
-    try {
-      if (!groupId) return;
-      socket.join(groupId);
-      console.log(`socket ${socket.id} a rejoint la room groupe ${groupId} (user ${userId})`);
-
-      // send all previous messages of this group to this socket
-      const messages = await Message.find({ groupId }).sort({ createdAt: 1 });
-      socket.emit("receiveGroupHistory", { groupId, messages });
-
-    } catch (err) {
-      console.error("joinGroup error", err);
-    }
-  });
-
-  socket.on("sendMessage", async ({ senderId, receiverId, text }) => {
-    try {
-      const newMsg = new Message({ senderId, receiverId, text, read: false });
-      const saved = await newMsg.save();
-      socket.emit("receiveMessage", saved);
-      const receiverSocket = userSocketMap[String(receiverId).trim().toLowerCase()];
-      if (receiverSocket) io.to(receiverSocket).emit("receiveMessage", saved);
-    } catch (err) {
-      console.error("❌ Erreur sendMessage:", err);
-    }
-  });
-
-  socket.on("sendGroupMessage", async ({ senderId, groupId, text }) => {
-    try {
-      if (!groupId) return;
-      const newMsg = new Message({ senderId, groupId, text, read: false });
-      const saved = await newMsg.save();
-      io.to(groupId).emit("receiveMessage", saved);
-    } catch (err) {
-      console.error("❌ Erreur sendGroupMessage:", err);
-    }
-  });
-
-  socket.on("typing", ({ sender, receiver, groupId, isTyping }) => {
-    try {
-      if (groupId) {
-        socket.to(groupId).emit("typing", { sender, isTyping, groupId });
-      } else if (receiver) {
-        const receiverSocket = userSocketMap[String(receiver).trim().toLowerCase()];
-        if (receiverSocket) io.to(receiverSocket).emit("typing", { sender, isTyping });
-      }
-    } catch (err) {
-      console.error("typing error", err);
-    }
-  });
-
-  socket.on("markAsRead", async ({ reader, other }) => {
-    try {
-      const lastMsg = await Message.findOne(
-        { senderId: other, receiverId: reader, read: false },
-        {},
-        { sort: { createdAt: -1 } }
-      );
-      if (!lastMsg) return;
-      lastMsg.read = true;
-      await lastMsg.save();
-      const otherSocket = userSocketMap[other];
-      if (otherSocket) io.to(otherSocket).emit("messageReadByOther", { lastMsgId: lastMsg._id });
-      const readerSocket = userSocketMap[reader];
-      if (readerSocket) io.to(readerSocket).emit("messageReadByOther", { lastMsgId: lastMsg._id });
-    } catch (err) {
-      console.error("❌ Erreur markAsRead:", err);
-    }
-  });
-
+  // ---- USER DISCONNECT ----
   socket.on("disconnect", () => {
-    const found = Object.entries(userSocketMap).find(([u, sId]) => sId === socket.id);
-    if (found) {
-      const disconnectedUser = found[0];
-      delete userSocketMap[disconnectedUser];
-      socket.broadcast.emit("userOffline", { userId: disconnectedUser });
+    const user = Object.keys(onlineUsers).find(u => onlineUsers[u] === socket.id);
+    if (user) {
+      delete onlineUsers[user];
+      io.emit("onlineUsers", Object.keys(onlineUsers));
     }
+  });
+
+  // ---- START CONVERSATION ----
+  socket.on("start_conversation", async ({ participants, groupName }) => {
+    try {
+      if (!Array.isArray(participants) || participants.length < 2)
+        return socket.emit("error", { message: "participants must be an array with at least 2 emails" });
+
+      const normalized = [...new Set(participants.map(e => e.trim().toLowerCase()))].sort();
+
+      // Rechercher la conversation existante
+      let conv = await Conversation.findOne({
+        participants: { $all: normalized, $size: normalized.length }
+      });
+
+      // Créer si elle n'existe pas
+      if (!conv) {
+        conv = await Conversation.create({
+          participants: normalized,
+          type: normalized.length > 2 ? "groupe" : "privée",
+          groupName: normalized.length > 2 ? `Groupe-${Date.now()}` : "",
+          createdBy: normalized[0],
+          lastActivity: new Date()
+        });
+      }
+
+      // Joindre la salle
+      socket.join(conv._id.toString());
+
+      // Envoyer conversation créée
+      socket.emit("conversation_created", conv);
+
+      // Envoyer historique
+      const history = await Message.find({ id_conversation: conv._id.toString() }).sort({ time: 1 });
+      socket.emit("conversation_history", { conversationId: conv._id.toString(), messages: history });
+
+    } catch (err) {
+      console.error("Conversation error:", err);
+      socket.emit("error", { message: "Impossible de créer/rejoindre la conversation" });
+    }
+  });
+
+  // ---- JOIN CONVERSATION ----
+  socket.on("join_conversation", ({ conversationId }) => {
+    if (conversationId) {
+      socket.join(conversationId);
+    }
+  });
+
+  // ---- SEND MESSAGE ----
+  socket.on("send_message", async ({ conversationId, senderId, content }) => {
+    try {
+      if (!conversationId || !senderId || !content) return;
+
+      const msg = await Message.create({
+        id_conversation: conversationId,
+        id_sender: senderId,  // toujours email
+        typeMessage: "text",
+        content,
+        status: "sent"
+      });
+
+      io.to(conversationId).emit("receive_message", msg);
+
+      await Conversation.findByIdAndUpdate(conversationId, { lastActivity: new Date() });
+
+    } catch (err) {
+      console.error("send_message error:", err);
+    }
+  });
+
+  // ---- TYPING ----
+  socket.on("typing", ({ conversationId, senderId, isTyping }) => {
+    if (!conversationId || !senderId) return;
+    socket.to(conversationId).emit("typing", { sender: senderId, isTyping });
   });
 });
-// ---------------------------------------------------------
 
-const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => console.log(`🚀 Serveur sur http://localhost:${PORT}`));
+const PORT = process.env.PORT || 5000;
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
