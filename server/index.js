@@ -42,26 +42,18 @@ io.on("connection", (socket) => {
   // ---- USER DISCONNECT ----
   socket.on("disconnect", () => {
     const user = Object.keys(onlineUsers).find(u => onlineUsers[u] === socket.id);
-    if (user) {
-      delete onlineUsers[user];
-      io.emit("onlineUsers", Object.keys(onlineUsers));
-    }
+    if (user) delete onlineUsers[user];
+    io.emit("onlineUsers", Object.keys(onlineUsers));
   });
 
-  // ---- START CONVERSATION ----
+  // ---- START / JOIN CONVERSATION ----
   socket.on("start_conversation", async ({ participants, groupName }) => {
     try {
-      if (!Array.isArray(participants) || participants.length < 2)
-        return socket.emit("error", { message: "participants must be an array with at least 2 emails" });
-
       const normalized = [...new Set(participants.map(e => e.trim().toLowerCase()))].sort();
+      if (normalized.length < 2) return;
 
-      // Rechercher la conversation existante
-      let conv = await Conversation.findOne({
-        participants: { $all: normalized, $size: normalized.length }
-      });
+      let conv = await Conversation.findOne({ participants: normalized });
 
-      // Créer si elle n'existe pas
       if (!conv) {
         conv = await Conversation.create({
           participants: normalized,
@@ -72,7 +64,7 @@ io.on("connection", (socket) => {
         });
       }
 
-      // Joindre la salle
+      // Join room
       socket.join(conv._id.toString());
 
       // Envoyer conversation créée
@@ -88,11 +80,8 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ---- JOIN CONVERSATION ----
   socket.on("join_conversation", ({ conversationId }) => {
-    if (conversationId) {
-      socket.join(conversationId);
-    }
+    if (conversationId) socket.join(conversationId);
   });
 
   // ---- SEND MESSAGE ----
@@ -102,7 +91,7 @@ io.on("connection", (socket) => {
 
       const msg = await Message.create({
         id_conversation: conversationId,
-        id_sender: senderId,  // toujours email
+        id_sender: senderId,
         typeMessage: "text",
         content,
         status: "sent"
@@ -111,7 +100,6 @@ io.on("connection", (socket) => {
       io.to(conversationId).emit("receive_message", msg);
 
       await Conversation.findByIdAndUpdate(conversationId, { lastActivity: new Date() });
-
     } catch (err) {
       console.error("send_message error:", err);
     }
